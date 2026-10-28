@@ -196,7 +196,7 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
             acct = nxt
             continue
         if not mgr.isolates:
-            capture(acct.slot, mgr.current_login())
+            capture(acct.slot, mgr.read_back())
         else:
             capture(acct.slot, FileBackend(gdir).read())
 

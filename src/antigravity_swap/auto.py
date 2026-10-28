@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TextIO
 
 from antigravity_swap import paths
+from antigravity_swap.credentials import CredentialError
 from antigravity_swap.fsutil import locked, read_json, write_json
 from antigravity_swap.manager import EXHAUSTED, Manager, SwitchError
 from antigravity_swap.store import Registry
@@ -124,7 +125,10 @@ def tick(mgr: Manager, policy: Policy) -> Tick:
     state = read_json(paths.state_file(), default={}) or {}
     with locked():
         reg = Registry.load()
-        active = mgr.capture_active(reg)
+        try:
+            active = mgr.capture_active(reg)
+        except CredentialError as e:  # unreadable login: report it and keep polling
+            return Tick(Outcome.ERROR, [_ev("error", message=str(e))])
         if active is None:
             reg.save()
             return Tick(Outcome.NOTHING, [_ev("no-switch", reason="the current agy login is not a managed account")])

@@ -5,8 +5,9 @@ agy keeps one JSON blob per login::
     {"token": {"access_token", "token_type", "refresh_token", "expiry"},
      "auth_method": "...", "id_token": "<JWT>"}
 
-agy 1.4.9 and later write ``"id_token_email": "<email>"`` in place of the JWT, so there is no
-``sub`` to match on; the email alone names the account.
+agy 1.4 (seen on 1.4.7 and 1.4.9) drops ``id_token`` and stores only the address, as
+``"id_token_email": "<email>"``, so there is no ``sub`` to match on; the email alone names
+the account.
 
 Where the blob lives depends on the platform:
 
@@ -36,10 +37,32 @@ from antigravity_swap.paths import IS_MACOS, IS_WINDOWS, token_file
 KEYRING_SERVICE = "gemini"
 KEYRING_USER = "antigravity"
 WINDOWS_TARGET = f"{KEYRING_SERVICE}:{KEYRING_USER}"
+ERROR_NOT_FOUND = 1168  # Windows: CredReadW found no such credential
+SEC_ITEM_NOT_FOUND_EXIT = 44  # macOS: `security` exit status for errSecItemNotFound
 
 
 class CredentialError(Exception):
     pass
+
+
+class CredentialFormatError(CredentialError):
+    """The login is not JSON at all: truncated, corrupted, or not something agy wrote."""
+
+
+class CredentialSchemaError(CredentialError):
+    """The login is JSON, but not in a shape aswap understands (agy may have changed its format)."""
+
+
+class CredentialAccessError(CredentialError):
+    """Where agy keeps its login could not be read: permissions, a locked or unreachable keyring,
+    a missing tool. Says nothing about whether a login is there."""
+
+
+def describe_keys(obj) -> str:
+    """The top-level keys of a parsed login, never its values (they are secrets)."""
+    if isinstance(obj, dict):
+        return "top-level keys: " + (", ".join(sorted(str(k) for k in obj)) or "none")
+    return f"top-level value is a JSON {type(obj).__name__}, not an object"
 
 
 @dataclass(frozen=True)
@@ -59,12 +82,14 @@ class Credential:
     """One agy login blob. Kept as the raw string so nothing agy wrote is lost."""
 
     def __init__(self, raw: str):
+        if not raw.strip():
+            raise CredentialFormatError("login is empty")
         try:
             self.data = json.loads(raw)
         except ValueError as e:
-            raise CredentialError(f"stored login is not JSON: {e}") from None
+            raise CredentialFormatError(f"login is not valid JSON ({e})") from None
         if not isinstance(self.data, dict) or not isinstance(self.data.get("token"), dict):
-            raise CredentialError("stored login has no token object")
+            raise CredentialSchemaError(f"login has no \"token\" object ({describe_keys(self.data)})")
         self.raw = raw
 
     @property
@@ -91,7 +116,10 @@ class Credential:
 
     def identity(self) -> Identity:
         claims = jwt_claims(self.data.get("id_token"))
-        email = claims.get("email") or self.data.get("id_token_email") or None
+        email = claims.get("email")
+        if not email:
+            plain = self.data.get("id_token_email")  # agy 1.4+
+            email = plain if isinstance(plain, str) and plain else None
         return Identity(email=email, sub=claims.get("sub"))
 
     def newer_than(self, other: "Credential | None") -> bool:
@@ -133,10 +161,22 @@ def jwt_claims(token) -> dict:
 
 
 # --- backends -------------------------------------------------------------------------
+#
+# read() returns None only when the store says there is no login. Anything else that stops the
+# read is a CredentialAccessError carrying the store's own message.
+
+
+def _tool(argv: list[str], **kw) -> subprocess.CompletedProcess:
+    """Run a keyring tool. One that cannot be started is an access error, not "no login"."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, **kw)
+    except OSError as e:
+        raise CredentialAccessError(f"cannot run {argv[0]}: {e.strerror or e}") from None
 
 
 class Backend:
     name = "?"
+    where = "?"  # where the login lives, for messages
     isolates_sessions = False
 
     def read(self) -> Credential | None:
@@ -153,12 +193,17 @@ class FileBackend(Backend):
     def __init__(self, gdir: Path):
         self.gdir = gdir
         self.path = token_file(gdir)
+        self.where = str(self.path)
 
     def read(self) -> Credential | None:
         try:
             raw = self.path.read_text(encoding="utf-8")
-        except OSError:
+        except FileNotFoundError:
             return None
+        except OSError as e:
+            raise CredentialAccessError(f"cannot read the file: {e.strerror or e}") from None
+        except UnicodeDecodeError:
+            raise CredentialFormatError("login is not UTF-8 text") from None
         return Credential(raw)
 
     def write(self, cred: Credential) -> None:
@@ -171,6 +216,7 @@ class WindowsBackend(Backend):
     def __init__(self, target: str = WINDOWS_TARGET, user: str = KEYRING_USER):
         self.target = target
         self.user = user
+        self.where = f"Credential Manager ({target})"
 
     def _api(self):
         import ctypes
@@ -192,7 +238,7 @@ class WindowsBackend(Backend):
                 ("UserName", w.LPWSTR),
             ]
 
-        adv = ctypes.windll.advapi32
+        adv = ctypes.WinDLL("advapi32", use_last_error=True)  # read() branches on the error code
         adv.CredReadW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.POINTER(ctypes.POINTER(CREDENTIAL))]
         adv.CredReadW.restype = w.BOOL
         adv.CredWriteW.argtypes = [ctypes.POINTER(CREDENTIAL), w.DWORD]
@@ -205,12 +251,18 @@ class WindowsBackend(Backend):
         ctypes, CREDENTIAL, adv = self._api()
         p = ctypes.POINTER(CREDENTIAL)()
         if not adv.CredReadW(self.target, 1, 0, ctypes.byref(p)):
-            return None
+            code = ctypes.get_last_error()
+            if code == ERROR_NOT_FOUND:
+                return None
+            raise CredentialAccessError(f"CredReadW failed: {ctypes.FormatError(code).strip()} (error {code})")
         try:
             blob = ctypes.string_at(p.contents.CredentialBlob, p.contents.CredentialBlobSize)
         finally:
             adv.CredFree(p)
-        return Credential(blob.decode("utf-8"))
+        try:
+            return Credential(blob.decode("utf-8"))
+        except UnicodeDecodeError:
+            raise CredentialFormatError("login is not UTF-8 text") from None
 
     def write(self, cred: Credential) -> None:
         ctypes, CREDENTIAL, adv = self._api()
@@ -226,7 +278,7 @@ class WindowsBackend(Backend):
         c.Persist = 2  # CRED_PERSIST_LOCAL_MACHINE, what agy uses
         c.UserName = self.user
         if not adv.CredWriteW(ctypes.byref(c), 0):
-            raise CredentialError(f"CredWriteW failed (error {ctypes.GetLastError()})")
+            raise CredentialError(f"CredWriteW failed (error {ctypes.get_last_error()})")
 
     def delete(self) -> bool:
         _, _, adv = self._api()
@@ -240,25 +292,27 @@ class MacKeychainBackend(Backend):
     """Experimental. Mirrors how go-keyring stores a generic password on macOS."""
 
     name = "keychain"
+    where = f"the macOS Keychain (service {KEYRING_SERVICE}, account {KEYRING_USER})"
 
     def read(self) -> Credential | None:
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYRING_SERVICE, "-a", KEYRING_USER, "-w"],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0 or not r.stdout.strip():
+        r = _tool(["security", "find-generic-password", "-s", KEYRING_SERVICE, "-a", KEYRING_USER, "-w"])
+        if r.returncode == SEC_ITEM_NOT_FOUND_EXIT:
             return None
+        if r.returncode != 0:
+            raise CredentialAccessError(
+                f"security find-generic-password failed (exit {r.returncode}): {r.stderr.strip() or 'no message'}")
         val = r.stdout.strip()
         if val.startswith(GO_KEYRING_PREFIX):
-            val = base64.b64decode(val[len(GO_KEYRING_PREFIX):]).decode("utf-8")
+            try:
+                val = base64.b64decode(val[len(GO_KEYRING_PREFIX):], validate=True).decode("utf-8")
+            except ValueError:
+                raise CredentialFormatError(f"login has the {GO_KEYRING_PREFIX} prefix but no valid base64 "
+                                            f"UTF-8 after it") from None
         return Credential(val)
 
     def write(self, cred: Credential) -> None:
         enc = GO_KEYRING_PREFIX + base64.b64encode(cred.raw.encode("utf-8")).decode()
-        r = subprocess.run(
-            ["security", "add-generic-password", "-U", "-s", KEYRING_SERVICE, "-a", KEYRING_USER, "-w", enc],
-            capture_output=True, text=True,
-        )
+        r = _tool(["security", "add-generic-password", "-U", "-s", KEYRING_SERVICE, "-a", KEYRING_USER, "-w", enc])
         if r.returncode != 0:
             raise CredentialError(f"security add-generic-password failed: {r.stderr.strip()}")
 
@@ -267,22 +321,21 @@ class SecretServiceBackend(Backend):
     """Experimental. Desktop Linux keyring via secret-tool, with go-keyring's attributes."""
 
     name = "secret-service"
+    where = f"the system keyring (service {KEYRING_SERVICE}, username {KEYRING_USER})"
 
     def read(self) -> Credential | None:
-        r = subprocess.run(
-            ["secret-tool", "lookup", "service", KEYRING_SERVICE, "username", KEYRING_USER],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0 or not r.stdout.strip():
+        r = _tool(["secret-tool", "lookup", "service", KEYRING_SERVICE, "username", KEYRING_USER])
+        if r.returncode != 0:
+            # secret-tool exits 1 both when nothing matches and when it fails; only a failure
+            # prints a message.
+            if r.stderr.strip():
+                raise CredentialAccessError(f"secret-tool lookup failed: {r.stderr.strip()}")
             return None
         return Credential(r.stdout.strip())
 
     def write(self, cred: Credential) -> None:
-        r = subprocess.run(
-            ["secret-tool", "store", "--label", "Password for 'antigravity' on 'gemini'",
-             "service", KEYRING_SERVICE, "username", KEYRING_USER],
-            input=cred.raw, capture_output=True, text=True,
-        )
+        r = _tool(["secret-tool", "store", "--label", "Password for 'antigravity' on 'gemini'",
+                   "service", KEYRING_SERVICE, "username", KEYRING_USER], input=cred.raw)
         if r.returncode != 0:
             raise CredentialError(f"secret-tool store failed: {r.stderr.strip()}")
 
@@ -311,14 +364,14 @@ def default_backend(gdir: Path) -> Backend:
         try:
             if kc.read() is not None:
                 return kc
-        except (OSError, CredentialError):
-            pass
+        except CredentialError:
+            return kc  # unusable login or unreadable Keychain: let the read say which
         return fb
     if shutil.which("secret-tool"):
         ss = SecretServiceBackend()
         try:
             if ss.read() is not None:
                 return ss
-        except (OSError, CredentialError):
-            pass
+        except CredentialError:
+            return ss  # unusable login or unreachable keyring: let the read say which
     return fb

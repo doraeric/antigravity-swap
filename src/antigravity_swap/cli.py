@@ -194,7 +194,7 @@ def cmd_status(mgr, args):
         print(json.dumps(payload, indent=2))
         return 0
     if cred is None:
-        print("agy is not signed in.")
+        print(f"agy is not signed in (no login in {mgr.backend.where}).")
     elif active is None:
         print(f"Signed in as {cred.identity().email or 'unknown'}, not managed by aswap. Run: aswap add")
     else:
