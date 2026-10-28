@@ -16,14 +16,19 @@ def b64(obj) -> str:
     return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
 
 
-def make_cred(email: str, expiry_in: float = 3600, access: str | None = None) -> Credential:
+def make_cred(email: str, expiry_in: float = 3600, access: str | None = None,
+              email_only: bool = False) -> Credential:
+    """An agy login. ``email_only`` builds agy 1.4's shape: ``id_token_email``, no ``id_token``."""
     exp = time.strftime("%Y-%m-%dT%H:%M:%S.123456789Z", time.gmtime(time.time() + expiry_in))
-    idt = f"{b64({'alg': 'none'})}.{b64({'email': email, 'sub': 'sub-' + email})}.sig"
-    return Credential(json.dumps({
-        "token": {"access_token": access or f"at-{email}", "token_type": "Bearer",
-                  "refresh_token": f"rt-{email}", "expiry": exp},
-        "auth_method": "oauth", "id_token": idt,
-    }))
+    blob = {"token": {"access_token": access or f"at-{email}", "token_type": "Bearer",
+                      "refresh_token": f"rt-{email}", "expiry": exp},
+            "auth_method": "oauth"}
+    if email_only:
+        blob["token"]["expires_in"] = int(expiry_in)
+        blob["id_token_email"] = email
+    else:
+        blob["id_token"] = f"{b64({'alg': 'none'})}.{b64({'email': email, 'sub': 'sub-' + email})}.sig"
+    return Credential(json.dumps(blob))
 
 
 @pytest.fixture

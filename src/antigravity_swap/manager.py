@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from antigravity_swap import agy, paths
-from antigravity_swap.credentials import Backend, Credential, CredentialError, FileBackend, default_backend
+from antigravity_swap.credentials import (Backend, Credential, CredentialError, CredentialSchemaError, FileBackend,
+                                          default_backend, describe_keys)
 from antigravity_swap.fsutil import locked, read_json, write_json
 from antigravity_swap.settings import Settings
 from antigravity_swap.store import Account, Registry, StoreError, capture, load_cred, save_cred, usage_path
@@ -56,10 +57,28 @@ class Manager:
             self._agy = agy.find_agy(self.settings.get("agy.path"))
         return self._agy
 
-    def current_login(self) -> Credential | None:
+    @staticmethod
+    def read_login(backend: Backend) -> Credential | None:
+        """The login in ``backend``, or None when the store says there is none.
+
+        Anything else is an error, not "signed out": CredentialAccessError when the store cannot
+        be read, CredentialFormatError when the login is not JSON, CredentialSchemaError when it is
+        JSON in a shape aswap does not know.
+        """
         try:
-            return self.backend.read()
-        except (OSError, CredentialError):
+            return backend.read()
+        except CredentialError as e:
+            raise type(e)(f"agy's login in {backend.where}: {e}") from None
+
+    def current_login(self) -> Credential | None:
+        return self.read_login(self.backend)
+
+    def read_back(self) -> Credential | None:
+        """The live login after agy ran, to keep the token it renewed. Best effort: the work it
+        follows is done, so an unreadable login is skipped here and reported by the next read."""
+        try:
+            return self.current_login()
+        except CredentialError:
             return None
 
     def active(self, reg: Registry) -> Account | None:
@@ -80,17 +99,22 @@ class Manager:
 
     def add(self, reg: Registry, slot: int | None = None, alias: str | None = None,
             from_dir: Path | None = None, force: bool = False) -> tuple[Account, str]:
+        source = FileBackend(Path(from_dir)) if from_dir is not None else self.backend
         if from_dir is not None:
-            cred = FileBackend(Path(from_dir)).read()
+            cred = self.read_login(source)
             if cred is None:
                 raise StoreError(f"no agy login in {from_dir}")
         else:
             cred = self.current_login()
             if cred is None:
-                raise StoreError("agy is not signed in. Run agy, sign in, then: aswap add")
+                raise StoreError(f"agy is not signed in (no login in {source.where}). "
+                                 f"Run agy, sign in, then: aswap add")
         ident = cred.identity()
         if not ident.email and not ident.sub:
-            raise StoreError("this login carries no identity (no id_token); sign in again with agy")
+            raise CredentialSchemaError(
+                f"agy's login in {source.where} names no account: it has neither id_token nor "
+                f"id_token_email ({describe_keys(cred.data)}). agy may have changed its login "
+                f"format; this aswap version does not know it yet.")
         existing = reg.find_identity(ident)
         if existing and (slot is None or slot == existing.slot):
             save_cred(existing.slot, cred)
@@ -156,7 +180,7 @@ class Manager:
                     raise SwitchError(f"account {target.slot} login does not work ({check.message}); "
                                       f"switched back. It is quarantined until you re-add it.")
                 if check.ok:
-                    capture(target.slot, self.current_login())
+                    capture(target.slot, self.read_back())
         record_switch(target.slot)
         return SwitchResult(True, prev, target, "switched", verified)
 
@@ -244,7 +268,7 @@ class Manager:
             return load_cred(acct.slot), True, ("token_expired", "agy not found")
         if is_active:
             check = agy.check_login(cmd, self.gdir)
-            cred = self.current_login()
+            cred = self.read_back()
             if cred is not None:
                 capture(acct.slot, cred)
         elif self.isolates:
@@ -284,7 +308,7 @@ class Manager:
         try:
             self.backend.write(stored)
             check = agy.check_login(cmd, self.gdir)
-            after = self.current_login()
+            after = self.read_back()
         finally:
             if before is not None:
                 self.backend.write(before)
