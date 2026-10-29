@@ -56,6 +56,8 @@ pipx upgrade antigravity-swap
 
 On Windows, `aswap upgrade` prints the command instead of running it, because Windows keeps `aswap.exe` locked while it runs.
 
+`aswap upgrade` installs the PyPI release. On an install from a checkout (`uv tool install --force .`), it replaces that build; update the checkout and run `uv tool install --force .` again instead.
+
 ## Usage
 
 ### Add your accounts
@@ -63,10 +65,37 @@ On Windows, `aswap upgrade` prints the command instead of running it, because Wi
 Sign in to agy with your first account, then:
 
 ```bash
-aswap add
+aswap add --alias home
 ```
 
-Sign in to agy with the next account (just run `agy` and pick it; no need to sign out first) and run `aswap add` again. Repeat for each account. Re-running `aswap add` on an account that is already stored updates its login instead of duplicating it.
+agy only asks you to sign in when it has no login: plain `agy` starts on the current one, and agy 1.4 answers `/login` with `Unknown command`. So for each further account, remove agy's login from this machine, sign in again, and add that account:
+
+1. Quit every agy, including a Remote Control daemon (`agy remote-control stop`). `pgrep -l agy` should print nothing. An agy that is still running holds the old account and can write it back when it renews its token.
+2. Make sure aswap holds the login you are about to remove. Run `aswap add` once more: for an account aswap already has, it refreshes the stored copy with the token agy renewed last, and prints `Updated account <n>: <email>` (`Added account …` if aswap did not have it yet, which stores it now). Do not go on unless it names the account that is signed in now.
+3. Check what will be removed, then remove agy's login on this machine. This deletes only the local copy: nothing is sent to Google. `aswap status --json` shows which `backend` you have.
+
+   | `backend` | Check | Remove |
+   |---|---|---|
+   | `secret-service` (desktop Linux) | `secret-tool search --all service gemini username antigravity 2>&1 \| grep -v '^secret'` | `secret-tool clear service gemini username antigravity` |
+   | `keychain` (macOS) | `security find-generic-password -s gemini -a antigravity` | `security delete-generic-password -s gemini -a antigravity` |
+   | `wincred` (Windows) | Credential Manager → Windows Credentials → Generic Credentials → `gemini:antigravity` | Remove that entry |
+   | `file` (Linux without a keyring) | `ls -l ~/.gemini/antigravity-cli/antigravity-oauth-token` | `rm ~/.gemini/antigravity-cli/antigravity-oauth-token` |
+
+   The check must show exactly one entry: on desktop Linux, one item labelled `Password for 'antigravity' on 'gemini'`. If it shows more than one, or something else, stop: the remove command deletes everything the check shows. The checks never print the token (plain `secret-tool search` would, hence the `grep`). The `keychain` and `wincred` rows have not been tried on real machines yet.
+
+   agy's keyring library stores the login as one item with two attributes, `service` = `gemini` and `username` = `antigravity` (`account` on macOS). `secret-tool search` and `clear` take those as attribute/value pairs and match every item that carries all of them.
+4. Run `agy`. It asks you to sign in: use the next account, then quit agy.
+5. Add it:
+
+   ```bash
+   aswap add --alias work
+   ```
+
+Between steps 3 and 4, `aswap status` reports `agy is not signed in`. If something goes wrong after step 3, `aswap switch 1` puts account 1's login back, even when agy has none. Repeat the steps for each account. Re-running `aswap add` on an account that is already stored updates its login instead of duplicating it.
+
+Do not use agy's `/logout` to make room for the next account: signing out may revoke the login with Google, and the copy aswap stored would stop working with it.
+
+To check that a stored login still works, switch to it (`aswap switch 2`). The switch proves the login with `agy models`; a login that no longer works is switched back and quarantined, and adding that account again as above restores it.
 
 Already keep accounts in separate agy directories (`agy --gemini_dir=...`)? Import them directly:
 
@@ -240,7 +269,7 @@ On Windows and keyring platforms the login is global: `agy --gemini_dir` changes
 
 Access tokens last about an hour. To keep every account's quota fresh there, aswap renews an expired non-active account by putting its login in place for the few seconds `agy models` takes (no quota is spent), saving the renewed token, and putting your login back, all under aswap's lock. Running agy sessions are not affected, since they hold their token in memory. An agy you launch during those seconds would start on the borrowed account. Turn it off with `aswap config set usage.renew_inactive false`; non-active accounts then show `token expired` an hour after their last use. Force a backend with `ASWAP_BACKEND=file|wincred|keychain|secret-service`.
 
-Tested against agy 1.2.x on Linux and Windows. macOS and desktop-keyring support follow how agy's keyring library stores the login and have not been tested on real machines yet; reports welcome.
+Tested against agy 1.2.x on Linux and Windows, and `add` and `status` against agy 1.4.7 with a desktop Linux keyring. macOS and desktop-keyring support follow how agy's keyring library stores the login and have not been tested on real machines yet; reports welcome.
 
 ## Other commands
 
@@ -328,7 +357,7 @@ Rows may also carry `alias`, `disabled`, `limitedUntil` / `limitedReason`, `quar
 
 ## How it works
 
-- `aswap add` copies agy's login (its OAuth token blob) into aswap's data folder, labelled by the email in its ID token.
+- `aswap add` copies agy's login (its OAuth token blob) into aswap's data folder, labelled by its email: from the ID token, or from `id_token_email`, which agy 1.4 stores instead.
 - `aswap switch` saves the current login back to its slot first (agy may have renewed it), then writes the target's login where agy reads it, under a lock so two aswap processes never interleave.
 - Which account is active is never stored: aswap reads agy's current login and matches it, so it cannot drift.
 - Token renewal is agy's own: aswap runs `agy models`, which renews an expired access token and writes it back. aswap never holds an OAuth client secret.
@@ -344,7 +373,7 @@ Rows may also carry `alias`, `disabled`, `limitedUntil` / `limitedReason`, `quar
 
 Override with `ASWAP_HOME`. Inside: `accounts.json`, `credentials/<n>.json` (0600, folder 0700), `usage/`, `sessions/<n>/` (agy directories for `run` and `exec`), `settings.json`. `ASWAP_GEMINI_DIR` overrides agy's default `~/.gemini`.
 
-The stored logins and `aswap export` files are live credentials in plaintext. Treat them like SSH keys.
+The stored logins and `aswap export` files are live credentials in plaintext. Treat them like SSH keys. `aswap import` trusts the file it reads: only import exports you made yourself.
 
 ## Uninstall
 
