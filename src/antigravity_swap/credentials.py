@@ -366,6 +366,7 @@ def default_backend(gdir: Path) -> Backend:
                 return kc
         except CredentialError:
             return kc  # unusable login or unreadable Keychain: let the read say which
+        fb.where = f"{fb.path} or {kc.where}"  # both were looked in
         return fb
     if shutil.which("secret-tool"):
         ss = SecretServiceBackend()
@@ -374,4 +375,5 @@ def default_backend(gdir: Path) -> Backend:
                 return ss
         except CredentialError:
             return ss  # unusable login or unreachable keyring: let the read say which
+        fb.where = f"{fb.path} or {ss.where}"  # both were looked in
     return fb

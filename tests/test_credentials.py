@@ -134,15 +134,23 @@ def test_wincred_absent_is_signed_out():
     assert WindowsBackend(target="antigravity-swap-test:absent").read() is None
 
 
-@pytest.mark.parametrize("cls,on_mac", [(SecretServiceBackend, False), (MacKeychainBackend, True)])
-@pytest.mark.parametrize("err", [CredentialFormatError("login is not valid JSON (test)"),
-                                 CredentialAccessError("secret-tool lookup failed: keyring is locked (test)")])
-def test_detection_keeps_a_keyring_it_cannot_use(env, monkeypatch, cls, on_mac, err):
+KEYRINGS = [(SecretServiceBackend, False), (MacKeychainBackend, True)]
+
+
+def detect_as(monkeypatch, on_mac):
+    """Let default_backend() probe a keyring, as on macOS or desktop Linux."""
     from antigravity_swap import credentials
     monkeypatch.delenv("ASWAP_BACKEND")
     monkeypatch.setattr(credentials, "IS_WINDOWS", False)
     monkeypatch.setattr(credentials, "IS_MACOS", on_mac)
     monkeypatch.setattr(credentials.shutil, "which", lambda name: "/usr/bin/" + name)
+
+
+@pytest.mark.parametrize("cls,on_mac", KEYRINGS)
+@pytest.mark.parametrize("err", [CredentialFormatError("login is not valid JSON (test)"),
+                                 CredentialAccessError("secret-tool lookup failed: keyring is locked (test)")])
+def test_detection_keeps_a_keyring_it_cannot_use(env, monkeypatch, cls, on_mac, err):
+    detect_as(monkeypatch, on_mac)
 
     def unusable(self):
         raise err
@@ -150,6 +158,15 @@ def test_detection_keeps_a_keyring_it_cannot_use(env, monkeypatch, cls, on_mac, 
     assert isinstance(default_backend(env.gdir), cls)
     with pytest.raises(type(err), match="(keyring|Keychain).*: " + re.escape(str(err))):
         Manager().current_login()
+
+
+@pytest.mark.parametrize("cls,on_mac", KEYRINGS)
+def test_signed_out_names_every_place_it_looked(env, monkeypatch, capsys, cls, on_mac):
+    detect_as(monkeypatch, on_mac)
+    monkeypatch.setattr(cls, "read", lambda self: None)  # the keyring has no login either
+    assert main(["add"]) == 1
+    err = capsys.readouterr().err
+    assert "not signed in" in err and str(env.backend.path) in err and cls.where in err
 
 
 def test_add_shows_the_keyring_error_not_signed_out(env, monkeypatch, capsys):
@@ -187,6 +204,17 @@ def test_agy_14_logins_add_and_switch(env):
     assert env.backend.read().identity().email == "a@x.io"
     assert load_cred(2).identity().email == "b@x.io"  # the login it left is kept
     assert "id_token_email" in json.loads(load_cred(1).raw)  # the blob travels whole
+
+
+def test_switch_puts_a_stored_login_back_when_agy_has_none(env):
+    from test_core import add_accounts
+    env.plan({"a@x.io": "ok"})
+    mgr, reg = add_accounts(env, "a@x.io")
+    env.backend.path.unlink()  # the login was removed to sign in to another account
+    assert mgr.current_login() is None
+    res = mgr.switch(reg, reg.get(1))
+    assert res.switched and res.verified
+    assert env.backend.read().identity().email == "a@x.io"
 
 
 def test_switch_succeeds_when_the_read_back_fails(env, monkeypatch):
