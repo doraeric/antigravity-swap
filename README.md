@@ -213,6 +213,8 @@ To make it the default, alias it:
 alias agy='aswap run --'          # bash/zsh; agy -c becomes aswap run -- -c
 ```
 
+An alias only reaches your interactive shell; [`aswap shim`](#make-a-plain-agy-pick-the-account-aswap-shim) reaches every `agy`.
+
 `aswap run --no-failover` (or `aswap config set run.failover false`) runs a plain session on one account.
 
 **Where each account runs.** On Linux each account other than the default login gets its own agy directory under aswap's data folder, with your settings, MCP config, skills and finished first-run setup mirrored from `~/.gemini` on every launch, so several accounts run side by side. On Windows and keyring platforms agy has one login per machine, so a hop switches the default login, and says so.
@@ -239,6 +241,24 @@ aswap exec --strategy round-robin --max-hops 3 -- -p "..."
 ```
 
 Before each hop aswap checks the login with `agy models`; an account whose login is dead is quarantined and skipped instead of stalling on a sign-in prompt. Output: with no `--output-format`, you get the final response as plain text; `json` gives agy's JSON; `stream-json` streams through. Exit code is agy's, or `3` when every account is spent. `aswap run -- -p "..."` does the same thing.
+
+### Make a plain `agy` pick the account: `aswap shim`
+
+```bash
+aswap shim install      # put aswap in front of agy
+aswap shim              # where it is
+aswap shim uninstall    # put the original agy back
+```
+
+With the shim installed, every `agy` goes through aswap: a session starts on the account `aswap auto` would pick, with `aswap run`'s failover. agy's own subcommands, such as `agy models` and `agy update`, go straight to agy. If agy is not signed in, the session starts on one of aswap's accounts; if it is signed in with an account aswap does not manage, agy starts as is.
+
+`aswap shim install` renames your current `agy` to `agy.real` and puts the shim in its place. If it cannot write to that directory, it puts the shim in an earlier directory on PATH or in `~/.local/bin`, and tells you if PATH needs changing.
+
+If an agy update overwrites the shim, aswap puts it back the next time it runs, keeping the updated agy as `agy.real`.
+
+If your `agy` is your own wrapper that picks a data directory, tell aswap which one: `aswap config set agy.gemini_dir <dir>`.
+
+Needs aswap installed with uv or pipx, on Linux or macOS. Tested only with the test suite's stand-in agy so far.
 
 ### Strategies
 
@@ -335,6 +355,7 @@ aswap config path
 | `usage.renew` | `true` | renew expired tokens with `agy models` before reading quota |
 | `usage.renew_inactive` | `true` | on single-login platforms, renew other accounts by a brief login swap |
 | `agy.path` | (PATH) | the agy binary to use; the `ASWAP_AGY` environment variable overrides it |
+| `agy.gemini_dir` | (`~/.gemini`) | agy's data directory; set it if your agy wrapper picks one. `ASWAP_GEMINI_DIR` overrides it |
 
 ## JSON output
 
@@ -371,14 +392,14 @@ Rows may also carry `alias`, `disabled`, `limitedUntil` / `limitedReason`, `quar
 | macOS | `~/Library/Application Support/antigravity-swap/` |
 | Windows | `%LOCALAPPDATA%\antigravity-swap\` |
 
-Override with `ASWAP_HOME`. Inside: `accounts.json`, `credentials/<n>.json` (0600, folder 0700), `usage/`, `sessions/<n>/` (agy directories for `run` and `exec`), `settings.json`. `ASWAP_GEMINI_DIR` overrides agy's default `~/.gemini`.
+Override with `ASWAP_HOME`. Inside: `accounts.json`, `credentials/<n>.json` (0600, folder 0700), `usage/`, `sessions/<n>/` (agy directories for `run` and `exec`), `settings.json`, `shim.json` (where the agy shim is). `ASWAP_GEMINI_DIR`, or the `agy.gemini_dir` setting, overrides agy's default `~/.gemini`.
 
 The stored logins and `aswap export` files are live credentials in plaintext. Treat them like SSH keys. `aswap import` trusts the file it reads: only import exports you made yourself.
 
 ## Uninstall
 
 ```bash
-aswap purge
+aswap purge                           # also takes the agy shim out
 uv tool uninstall antigravity-swap    # or: pipx uninstall antigravity-swap
 ```
 

@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from antigravity_swap import paths
+from antigravity_swap import paths, shimfile
 from antigravity_swap.credentials import FileBackend
 from antigravity_swap.store import load_cred
 
@@ -27,7 +27,11 @@ class AgyNotFound(Exception):
 
 
 def find_agy(configured: str = "") -> list[str]:
-    """The command that runs agy, as an argv prefix. ``ASWAP_AGY`` beats ``agy.path``."""
+    """The command that runs agy, as an argv prefix.
+
+    ``ASWAP_AGY`` beats ``agy.path``; then the agy behind an installed shim; then the first agy on
+    PATH that is not aswap's shim. The shim sets ``ASWAP_AGY`` for the aswap it starts.
+    """
     cand = os.environ.get("ASWAP_AGY", "") or configured
     if cand:
         if Path(cand).suffix == ".py":
@@ -35,12 +39,12 @@ def find_agy(configured: str = "") -> list[str]:
 
             return [sys.executable, cand]
         return [cand]
-    found = shutil.which("agy")
+    found = shimfile.recorded_real() or shimfile.which_agy()
     if found:
         return [found]
     for p in (Path.home() / ".local" / "bin" / "agy",
               Path(os.environ.get("LOCALAPPDATA", "")) / "agy" / "bin" / "agy.exe"):
-        if p.is_file():
+        if p.is_file() and not shimfile.is_shim(p):
             return [str(p)]
     raise AgyNotFound("agy not found on PATH; set it with: aswap config set agy.path <path>")
 

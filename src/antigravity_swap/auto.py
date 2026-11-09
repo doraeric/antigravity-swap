@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TextIO
 
-from antigravity_swap import paths
+from antigravity_swap import paths, shimfile
 from antigravity_swap.credentials import CredentialError
 from antigravity_swap.fsutil import locked, read_json, write_json
 from antigravity_swap.manager import EXHAUSTED, Manager, SwitchError
@@ -203,6 +203,10 @@ def run(mgr: Manager, policy: Policy, once: bool = False, as_json: bool = False,
         return int(t.outcome)
     try:
         while True:
+            try:
+                shimfile.heal(sys.stderr)  # an agy update may have replaced the shim since the last tick
+            except Exception as e:  # noqa: BLE001 - never stop the loop over the shim
+                sys.stderr.write(f"aswap: could not check the agy shim: {e}\n")
             t = tick(mgr, policy)
             emit(t)
             delay = policy.interval

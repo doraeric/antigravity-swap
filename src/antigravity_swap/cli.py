@@ -12,15 +12,15 @@ import sys
 import time
 from pathlib import Path
 
-from antigravity_swap import __version__, agy, auto, paths, style, views
+from antigravity_swap import __version__, agy, auto, paths, shimfile, style, views
 from antigravity_swap.credentials import Credential, CredentialError, FileBackend
 from antigravity_swap.failover import ExecError, run_exec
-from antigravity_swap.supervise import run_interactive
 from antigravity_swap.fsutil import locked, write_atomic
 from antigravity_swap.manager import Manager, SwitchError, with_registry
 from antigravity_swap.settings import KEYS, PICK_STRATEGIES, POOLS, STRATEGIES, Settings
 from antigravity_swap.settings import strategy as strategy_name
 from antigravity_swap.store import Registry, StoreError, capture, load_cred, save_cred
+from antigravity_swap.supervise import run_interactive
 from antigravity_swap.usage import WINDOW_ORDER, windows
 
 SCHEMA = 1
@@ -562,8 +562,23 @@ def cmd_purge(mgr, args):
             raise CliError("purge deletes every stored login; pass --yes to confirm")
         if input(f"Delete everything in {d}? The agy login itself is untouched. [y/N] ").strip().lower() != "y":
             return 1
+    if shimfile.load_record() is not None:  # the record goes with the data; take the shim out first
+        try:
+            shimfile.uninstall(sys.stdout)
+        except shimfile.ShimError as e:
+            raise CliError(f"{e}; nothing was purged") from None
     shutil.rmtree(d, ignore_errors=True)
     print(f"Removed {d}.")
+    return 0
+
+
+def cmd_shim(mgr, args):
+    if args.action == "install":
+        shimfile.install(sys.stdout)
+    elif args.action == "uninstall":
+        shimfile.uninstall(sys.stdout)
+    else:
+        shimfile.status(sys.stdout)
     return 0
 
 
@@ -680,6 +695,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("purge", help="delete all aswap data")
     s.add_argument("--yes", action="store_true")
 
+    s = sub.add_parser("shim", help="install, show or remove the agy shim, which makes a plain `agy` pick the account")
+    s.add_argument("action", nargs="?", choices=["status", "install", "uninstall"], default="status")
+
     sub.add_parser("upgrade", aliases=["update"], help="upgrade aswap itself")
     return p
 
@@ -690,7 +708,7 @@ COMMANDS = {
     "enable": cmd_enable, "limit": cmd_limit, "alias": cmd_alias, "remove": cmd_remove,
     "config": cmd_config, "export": cmd_export, "import": cmd_import, "map": cmd_map,
     "unmap": cmd_unmap, "purge": cmd_purge, "rm": cmd_remove, "upgrade": cmd_upgrade,
-    "update": cmd_upgrade,
+    "update": cmd_upgrade, "shim": cmd_shim,
 }
 
 # claude-swap's flag spellings, so muscle memory carries over: `aswap --list`, `--switch-to 2` ...
@@ -709,6 +727,14 @@ def translate_legacy(argv: list[str]) -> list[str]:
 PASSTHROUGH = {"run": cmd_run, "exec": cmd_exec}
 
 
+def heal_shim() -> None:
+    """Put the agy shim back if an agy update replaced it. Never stops the command it precedes."""
+    try:
+        shimfile.heal(sys.stderr)
+    except Exception as e:  # noqa: BLE001 - a broken shim check must not break every command
+        print(f"aswap: could not check the agy shim: {e}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     passthrough: list[str] = []
@@ -723,6 +749,8 @@ def main(argv: list[str] | None = None) -> int:
     if passthrough and cmd not in PASSTHROUGH:
         print("aswap: arguments after -- are only for 'run' and 'exec'", file=sys.stderr)
         return 2
+    if not (cmd == "shim" and args.action in ("install", "uninstall")):
+        heal_shim()
     try:
         mgr = Manager()
         if sys.stderr.isatty():
@@ -731,7 +759,7 @@ def main(argv: list[str] | None = None) -> int:
         if cmd in PASSTHROUGH:
             return PASSTHROUGH[cmd](mgr, args, passthrough)
         return COMMANDS[cmd](mgr, args)
-    except (CliError, StoreError, SwitchError, CredentialError, agy.AgyNotFound) as e:
+    except (CliError, StoreError, SwitchError, CredentialError, agy.AgyNotFound, shimfile.ShimError) as e:
         print(f"aswap: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

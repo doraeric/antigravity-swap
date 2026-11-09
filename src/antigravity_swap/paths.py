@@ -24,9 +24,12 @@ def data_dir() -> Path:
     return Path(base) / "antigravity-swap"
 
 
-def gemini_dir() -> Path:
-    """agy's default directory (what plain ``agy`` uses). ``ASWAP_GEMINI_DIR`` overrides it."""
-    override = os.environ.get("ASWAP_GEMINI_DIR")
+def gemini_dir(configured: str = "") -> Path:
+    """agy's default directory (what plain ``agy`` uses).
+
+    ``ASWAP_GEMINI_DIR`` beats ``configured`` (the ``agy.gemini_dir`` setting); with neither, ``~/.gemini``.
+    """
+    override = os.environ.get("ASWAP_GEMINI_DIR") or configured
     if override:
         return Path(override).expanduser()
     return Path.home() / ".gemini"
@@ -70,3 +73,7 @@ def state_file() -> Path:
 
 def lock_file() -> Path:
     return data_dir() / ".lock"
+
+
+def shim_record() -> Path:
+    return data_dir() / "shim.json"

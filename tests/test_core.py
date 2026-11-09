@@ -269,3 +269,15 @@ def test_renew_inactive_by_swap_on_global_login(env, monkeypatch):
     assert seen == ["renewed-b@x.io"]
     assert load_cred(2).access_token == "renewed-b@x.io"
     assert env.backend.read().identity().email == "a@x.io"  # default login is back
+
+
+def test_gemini_dir_setting_and_env(monkeypatch, tmp_path):
+    from antigravity_swap.manager import Manager
+    monkeypatch.setenv("ASWAP_HOME", str(tmp_path))
+    monkeypatch.setenv("ASWAP_BACKEND", "file")
+    monkeypatch.delenv("ASWAP_GEMINI_DIR", raising=False)
+    s = Settings()
+    s.set("agy.gemini_dir", str(tmp_path / "wrapper-dir"))
+    assert Manager(settings=s).gdir == tmp_path / "wrapper-dir"
+    monkeypatch.setenv("ASWAP_GEMINI_DIR", str(tmp_path / "env-dir"))
+    assert Manager(settings=s).gdir == tmp_path / "env-dir"

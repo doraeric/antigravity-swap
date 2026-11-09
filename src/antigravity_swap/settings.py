@@ -71,6 +71,9 @@ KEYS: dict[str, Key] = {k.name: k for k in [
         "Where agy has one global login (Windows), renew other accounts by swapping their login "
         "in for the few seconds `agy models` takes. Off: their quota goes stale after about an hour."),
     Key("agy.path", "", str, "Path to the agy binary. Empty: find it on PATH."),
+    Key("agy.gemini_dir", "", str,
+        "agy's data directory; set it if your agy wrapper picks one. Empty: ~/.gemini. "
+        "ASWAP_GEMINI_DIR overrides it."),
 ]}
 
 

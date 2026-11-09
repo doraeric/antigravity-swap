@@ -40,7 +40,7 @@ class SwitchResult:
 class Manager:
     def __init__(self, settings: Settings | None = None, backend: Backend | None = None):
         self.settings = settings or Settings.load()
-        self.gdir = paths.gemini_dir()
+        self.gdir = paths.gemini_dir(self.settings.get("agy.gemini_dir"))
         self.backend = backend or default_backend(self.gdir)
         self._agy: list[str] | None = None
         self.on_swap = None  # callback(account) before a renew-by-swap, for progress output
